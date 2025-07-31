@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "./TicketSale.sol";
-import "./UserRegionManager.sol";
-import "./LotteryManager.sol";
-import "./AdminEmergency.sol";
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/utils/Counters.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 /**
@@ -20,26 +19,25 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
  * - 座席情報管理
  * - 緊急停止機能
  */
-contract AntiScalpingTicket is
-    TicketSale,
-    UserRegionManager,
-    LotteryManager,
-    AdminEmergency
-{
+contract AntiScalpingTicket is ERC721, Ownable, ReentrancyGuard, Pausable {
+    using Counters for Counters.Counter;
     using ECDSA for bytes32;
+
+    // ===== 構造体定義 =====
 
     /**
      * @dev イベント情報構造体
      */
     struct Event {
         string name; // イベント名
-        uint256 eventDate; // イベント日時
+        uint256 eventDate; // 開催日時（Unix timestamp）
         uint256 maxTickets; // 最大チケット数
         uint256 originalPrice; // 定価
         uint256 maxResalePrice; // 転売上限価格
-        bool transferable; // 転売可否
-        bool refundable; // 返金可否
-        uint256 ticketsSold; // 売れたチケット数
+        bool transferable; // 譲渡可能フラグ
+        bool refundable; // 返金可能フラグ
+        mapping(address => uint256) purchaseCount; // ユーザー別購入数
+        uint256 ticketsSold; // 販売済み数
         bool isActive; // イベント有効フラグ
         uint256 saleStartTime; // 販売開始時刻
         uint256 saleEndTime; // 販売終了時刻
@@ -49,8 +47,8 @@ contract AntiScalpingTicket is
      * @dev チケット情報構造体
      */
     struct Ticket {
-        uint256 eventId; // イベントID
-        address originalBuyer; // オリジナル購入者
+        uint256 eventId; // 対象イベントID
+        address originalBuyer; // 元購入者
         uint256 purchasePrice; // 購入価格
         uint256 purchaseTime; // 購入時刻
         bool isUsed; // 使用済みフラグ
@@ -69,6 +67,19 @@ contract AntiScalpingTicket is
         uint256 timestamp;
     }
 
+    /**
+     * @dev 抽選情報構造体
+     */
+    struct LotteryInfo {
+        uint256 applicationStart; // 応募開始時刻
+        uint256 applicationEnd; // 応募終了時刻
+        uint256 maxWinners; // 当選者数上限
+        uint256 totalApplications; // 総応募数
+        bool isCompleted; // 抽選完了フラグ
+        bool isActive; // 抽選有効フラグ
+        uint256 winnerCount; // 当選者数
+    }
+
     // ===== 状態変数 =====
 
     // 基本マッピング
@@ -77,7 +88,29 @@ contract AntiScalpingTicket is
     // チケットID => チケット情報
     mapping(uint256 => Ticket) public tickets;
     mapping(address => bool) public authorizedSellers; // 公式販売者
-    // ...existing code...
+    mapping(address => bool) public verifiedUsers; // KYC済みユーザー
+    mapping(address => uint256) public userPurchaseLimit; // ユーザー別購入制限
+
+    // 追加マッピング
+    mapping(uint256 => TransferHistory[]) public transferHistories; // 転売履歴
+    mapping(address => bool) public blacklistedUsers; // ブラックリストユーザー
+    mapping(uint256 => mapping(address => bool)) public eventWhitelist; // イベント別ホワイトリスト
+    mapping(bytes32 => bool) public usedSecrets; // 使用済みシークレット
+
+    // 地理的制限
+    mapping(bytes32 => bool) public allowedRegions; // 許可地域ハッシュ
+    mapping(address => bytes32) public userRegion; // ユーザー地域ハッシュ
+    mapping(uint256 => bytes32[]) public eventRegions; // イベント別許可地域
+
+    // 時間制限転売システム
+    mapping(uint256 => uint256) public timeLimitedResaleEnd; // チケット別転売期限
+    mapping(uint256 => bool) public timeLimitedResaleEnabled; // 時間制限転売有効フラグ
+
+    // 抽選システム
+    mapping(uint256 => LotteryInfo) public lotteries; // イベント別抽選情報
+    mapping(uint256 => mapping(address => bool)) public lotteryApplications; // 抽選応募状況
+    mapping(uint256 => address[]) public lotteryParticipants; // 抽選参加者リスト
+    mapping(uint256 => mapping(address => bool)) public lotteryWinners; // 抽選当選者
 
     // カウンター
     Counters.Counter private _eventIds;
@@ -116,6 +149,7 @@ contract AntiScalpingTicket is
     ); // チケット返金時
     event UserBlacklisted(address indexed user, string reason); // ユーザーをブラックリスト追加時
     event UserWhitelisted(uint256 indexed eventId, address indexed user); // イベントごとホワイトリスト追加時
+    event EmergencyWithdraw(address indexed recipient, uint256 amount); // 緊急資金引き出し時
     event RegionUpdated(address indexed user, bytes32 regionHash); // ユーザー地域設定時
     event TimeLimitedResaleEnabled(uint256 indexed ticketId, uint256 endTime); // 時間制限転売有効化時
     event LotteryCreated(
@@ -873,6 +907,23 @@ contract AntiScalpingTicket is
     }
 
     // ===== 管理機能 =====
+
+    function withdrawFunds() external onlyOwner {
+        uint256 balance = address(this).balance;
+        require(balance > 0, "No funds to withdraw");
+        payable(owner()).transfer(balance);
+    }
+
+    /**
+     * @dev 緊急停止機能
+     */
+    function emergencyPause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
 
     /**
      * @dev 緊急資金引き出し（追加機能）
