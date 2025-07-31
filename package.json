@@ -1,0 +1,30 @@
+{
+  "name": "AntiScalpingTicketProject",
+  "version": "1.0.0",
+  "description": "A project for deploying and testing the AntiScalpingTicket NFT contract with KYC and resale restrictions.",
+  "scripts": {
+    "test": "hardhat test",
+    "deploy": "hardhat run scripts/deploy.js --network localhost"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^4.8.0",
+    "ethers": "^5.7.0"
+  },
+  "devDependencies": {
+    "@nomiclabs/hardhat-ethers": "^2.2.3",
+    "@nomiclabs/hardhat-waffle": "^2.0.6",
+    "chai": "^4.3.6",
+    "dotenv": "^17.2.1",
+    "ethereum-waffle": "^4.0.10",
+    "hardhat": "^2.26.1",
+    "mocha": "^11.7.1"
+  },
+  "keywords": [
+    "NFT",
+    "KYC",
+    "Anti-Scalping",
+    "Blockchain"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}
