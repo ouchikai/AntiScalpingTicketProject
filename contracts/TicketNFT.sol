@@ -37,7 +37,10 @@ abstract contract TicketNFT is ERC721, Ownable, Pausable, ReentrancyGuard {
         feeRecipient = _feeRecipient;
     }
 
-    function mintTicket(address to, uint256 eventId) public returns (uint256) {
+    function mintTicket(
+        address to,
+        uint256 eventId
+    ) internal returns (uint256) {
         uint256 tokenId = nextTokenId++;
         _safeMint(to, tokenId);
 
@@ -46,8 +49,7 @@ abstract contract TicketNFT is ERC721, Ownable, Pausable, ReentrancyGuard {
             originalOwner: to,
             isUsed: false,
             purchaseTime: block.timestamp,
-            transferHistory: new address[](0),
-            purchasePrice: 0
+            transferHistory: new address[](0)
         });
 
         emit TicketMinted(tokenId, to, eventId);
