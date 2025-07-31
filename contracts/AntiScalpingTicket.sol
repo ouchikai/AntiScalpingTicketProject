@@ -83,7 +83,9 @@ contract AntiScalpingTicket is ERC721, Ownable, ReentrancyGuard, Pausable {
     // ===== 状態変数 =====
 
     // 基本マッピング
+    // イベントID => イベント情報
     mapping(uint256 => Event) public events;
+    // チケットID => チケット情報
     mapping(uint256 => Ticket) public tickets;
     mapping(address => bool) public authorizedSellers; // 公式販売者
     mapping(address => bool) public verifiedUsers; // KYC済みユーザー
