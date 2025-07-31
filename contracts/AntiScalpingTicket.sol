@@ -38,9 +38,9 @@ contract AntiScalpingTicket is ERC721, Ownable, ReentrancyGuard, Pausable {
         bool refundable; // 返金可能フラグ
         mapping(address => uint256) purchaseCount; // ユーザー別購入数
         uint256 ticketsSold; // 販売済み数
-        bool isActive; // イベント有効フラグ（追加）
-        uint256 saleStartTime; // 販売開始時刻（追加）
-        uint256 saleEndTime; // 販売終了時刻（追加）
+        bool isActive; // イベント有効フラグ
+        uint256 saleStartTime; // 販売開始時刻
+        uint256 saleEndTime; // 販売終了時刻
     }
 
     /**
@@ -53,12 +53,12 @@ contract AntiScalpingTicket is ERC721, Ownable, ReentrancyGuard, Pausable {
         uint256 purchaseTime; // 購入時刻
         bool isUsed; // 使用済みフラグ
         string seatInfo; // 座席情報
-        uint256 transferCount; // 転売回数（追加）
-        bytes32 secretHash; // 入場用シークレットハッシュ（追加）
+        uint256 transferCount; // 転売回数
+        bytes32 secretHash; // 入場用シークレットハッシュ
     }
 
     /**
-     * @dev 転売履歴構造体（追加）
+     * @dev 転売履歴構造体
      */
     struct TransferHistory {
         address from;
@@ -68,7 +68,7 @@ contract AntiScalpingTicket is ERC721, Ownable, ReentrancyGuard, Pausable {
     }
 
     /**
-     * @dev 抽選情報構造体（追加）
+     * @dev 抽選情報構造体
      */
     struct LotteryInfo {
         uint256 applicationStart; // 応募開始時刻
@@ -120,45 +120,45 @@ contract AntiScalpingTicket is ERC721, Ownable, ReentrancyGuard, Pausable {
     uint256 public constant MAX_RESALE_MULTIPLIER = 110; // 110% = 10%プレミアムまで
     uint256 public constant TRANSFER_COOLDOWN = 24 hours; // 転売クールダウン期間
     uint256 public constant REFUND_DEADLINE_HOURS = 48; // 返金期限（時間）
-    uint256 public constant MAX_TRANSFER_COUNT = 3; // 最大転売回数（追加）
-    uint256 public constant PLATFORM_FEE_RATE = 250; // プラットフォーム手数料 2.5%（追加）
+    uint256 public constant MAX_TRANSFER_COUNT = 3; // 最大転売回数
+    uint256 public constant PLATFORM_FEE_RATE = 250; // プラットフォーム手数料 2.5%
 
     // 動的パラメータ
     uint256 public refundFeeRate = 500; // 返金手数料率（5% = 500/10000）
-    address public feeRecipient; // 手数料受取人（追加）
+    address public feeRecipient; // 手数料受取人
 
-    // ===== イベント定義 =====
+    // ===== イベント（ログ）定義 =====
 
-    event EventCreated(uint256 indexed eventId, string name, uint256 eventDate);
+    event EventCreated(uint256 indexed eventId, string name, uint256 eventDate); // 新規イベント作成時
     event TicketMinted(
         uint256 indexed ticketId,
         uint256 indexed eventId,
         address buyer
-    );
+    ); // チケット発行時
     event TicketTransferred(
         uint256 indexed ticketId,
         address from,
         address to,
         uint256 price
-    );
-    event TicketUsed(uint256 indexed ticketId, bytes32 secret);
+    ); // チケット転売時
+    event TicketUsed(uint256 indexed ticketId, bytes32 secret); // チケット使用時
     event TicketRefunded(
         uint256 indexed ticketId,
         address buyer,
         uint256 refundAmount
-    );
-    event UserBlacklisted(address indexed user, string reason); // 追加
-    event UserWhitelisted(uint256 indexed eventId, address indexed user); // 追加
-    event EmergencyWithdraw(address indexed recipient, uint256 amount); // 追加
-    event RegionUpdated(address indexed user, bytes32 regionHash); // 地理的制限
-    event TimeLimitedResaleEnabled(uint256 indexed ticketId, uint256 endTime); // 時間制限転売
+    ); // チケット返金時
+    event UserBlacklisted(address indexed user, string reason); // ユーザーをブラックリスト追加時
+    event UserWhitelisted(uint256 indexed eventId, address indexed user); // イベントごとホワイトリスト追加時
+    event EmergencyWithdraw(address indexed recipient, uint256 amount); // 緊急資金引き出し時
+    event RegionUpdated(address indexed user, bytes32 regionHash); // ユーザー地域設定時
+    event TimeLimitedResaleEnabled(uint256 indexed ticketId, uint256 endTime); // 時間制限転売有効化時
     event LotteryCreated(
         uint256 indexed eventId,
         uint256 applicationEnd,
         uint256 maxWinners
-    ); // 抽選
-    event LotteryEntered(uint256 indexed eventId, address indexed user); // 抽選応募
-    event LotteryCompleted(uint256 indexed eventId, uint256 winnerCount); // 抽選完了
+    ); // 抽選作成時
+    event LotteryEntered(uint256 indexed eventId, address indexed user); // 抽選応募時
+    event LotteryCompleted(uint256 indexed eventId, uint256 winnerCount); // 抽選完了時
 
     // ===== コンストラクタ =====
 
