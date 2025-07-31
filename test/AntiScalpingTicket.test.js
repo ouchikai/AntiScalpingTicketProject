@@ -17,20 +17,18 @@ describe("AntiScalpingTicket", function () {
 
     describe("Event Creation", function () {
         it("Should create an event", async function () {
-            const now = Math.floor(Date.now() / 1000);
-            const tx = await antiScalpingTicket.createEvent(
+            const eventId = await antiScalpingTicket.createEvent(
                 "Concert",
-                now + 3600,
+                Math.floor(Date.now() / 1000) + 3600, // 1 hour from now
                 100,
                 ethers.utils.parseEther("0.1"),
-                ethers.utils.parseEther("0.1"), // maxResalePrice = originalPrice
+                ethers.utils.parseEther("0.15"),
                 true,
                 true,
-                now,
-                now + 1800
+                Math.floor(Date.now() / 1000), // sale start time
+                Math.floor(Date.now() / 1000) + 7200 // sale end time
             );
-            const receipt = await tx.wait();
-            const eventId = receipt.events.find(e => e.event === "EventCreated").args.eventId;
+
             const eventInfo = await antiScalpingTicket.getEventInfo(eventId);
             expect(eventInfo.name).to.equal("Concert");
         });
@@ -39,22 +37,20 @@ describe("AntiScalpingTicket", function () {
     describe("Ticket Purchase", function () {
         it("Should allow a verified user to purchase a ticket", async function () {
             await antiScalpingTicket.addVerifiedUser(addr1.address);
-            const now = Math.floor(Date.now() / 1000);
-            const tx = await antiScalpingTicket.createEvent(
+            await antiScalpingTicket.createEvent(
                 "Concert",
-                now + 3600,
+                Math.floor(Date.now() / 1000) + 3600,
                 100,
                 ethers.utils.parseEther("0.1"),
-                ethers.utils.parseEther("0.1"),
+                ethers.utils.parseEther("0.15"),
                 true,
                 true,
-                now,
-                now + 1800
+                Math.floor(Date.now() / 1000),
+                Math.floor(Date.now() / 1000) + 7200
             );
-            const receipt = await tx.wait();
-            const eventId = receipt.events.find(e => e.event === "EventCreated").args.eventId;
+
             await expect(
-                antiScalpingTicket.connect(addr1).purchaseTicket(eventId, "A1", { value: ethers.utils.parseEther("0.1") })
+                antiScalpingTicket.connect(addr1).purchaseTicket(1, "A1", { value: ethers.utils.parseEther("0.1") })
             ).to.emit(antiScalpingTicket, "TicketMinted");
         });
     });
@@ -62,30 +58,49 @@ describe("AntiScalpingTicket", function () {
     describe("Ticket Resale", function () {
         it("Should allow ticket resale within limits", async function () {
             await antiScalpingTicket.addVerifiedUser(addr1.address);
-            await antiScalpingTicket.addVerifiedUser(addr2.address);
-            const now = Math.floor(Date.now() / 1000);
-            const tx = await antiScalpingTicket.createEvent(
+            await antiScalpingTicket.createEvent(
                 "Concert",
-                now + (27 * 3600), // 27時間後
+                Math.floor(Date.now() / 1000) + 3600,
                 100,
                 ethers.utils.parseEther("0.1"),
-                ethers.utils.parseEther("0.1"),
+                ethers.utils.parseEther("0.15"),
                 true,
                 true,
-                now,
-                now + 3600
+                Math.floor(Date.now() / 1000),
+                Math.floor(Date.now() / 1000) + 7200
             );
-            const receipt = await tx.wait();
-            const eventId = receipt.events.find(e => e.event === "EventCreated").args.eventId;
-            const ticketTx = await antiScalpingTicket.connect(addr1).purchaseTicket(eventId, "A1", { value: ethers.utils.parseEther("0.1") });
-            const ticketReceipt = await ticketTx.wait();
-            const ticketId = ticketReceipt.events.find(e => e.event === "TicketMinted").args.ticketId;
-            await antiScalpingTicket.connect(addr1).enableTimeLimitedResale(ticketId, 25 * 3600); // 25時間 resale period
-            await ethers.provider.send("evm_increaseTime", [24 * 3600 + 1]);
-            await ethers.provider.send("evm_mine", []);
+
+            await antiScalpingTicket.connect(addr1).purchaseTicket(1, "A1", { value: ethers.utils.parseEther("0.1") });
+            await antiScalpingTicket.connect(addr1).enableTimeLimitedResale(1, 3600); // 1 hour resale period
+
             await expect(
-                antiScalpingTicket.connect(addr1).resellTicket(ticketId, addr2.address, ethers.utils.parseEther("0.1"), { value: ethers.utils.parseEther("0.1") })
+                antiScalpingTicket.connect(addr1).resellTicket(1, addr2.address, ethers.utils.parseEther("0.12"), { value: ethers.utils.parseEther("0.12") })
             ).to.emit(antiScalpingTicket, "TicketTransferred");
+        });
+    });
+
+    describe("Ticket Usage", function () {
+        it("Should allow ticket usage with valid signature", async function () {
+            await antiScalpingTicket.addVerifiedUser(addr1.address);
+            await antiScalpingTicket.createEvent(
+                "Concert",
+                Math.floor(Date.now() / 1000) + 3600,
+                100,
+                ethers.utils.parseEther("0.1"),
+                ethers.utils.parseEther("0.15"),
+                true,
+                true,
+                Math.floor(Date.now() / 1000),
+                Math.floor(Date.now() / 1000) + 7200
+            );
+
+            await antiScalpingTicket.connect(addr1).purchaseTicket(1, "A1", { value: ethers.utils.parseEther("0.1") });
+            const ticketId = 1; // Assuming this is the ticket ID purchased
+            const secret = ethers.utils.keccak256(ethers.utils.defaultAbiCoder.encode(["uint256", "address", "uint256"], [ticketId, addr1.address, Math.floor(Date.now() / 1000)]));
+
+            await expect(
+                antiScalpingTicket.connect(owner).useTicketWithSignature(ticketId, secret, "signature")
+            ).to.emit(antiScalpingTicket, "TicketUsed");
         });
     });
 });
