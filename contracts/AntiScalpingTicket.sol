@@ -1,75 +1,144 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.19; // Solidityバージョン指定
 
-import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/security/Pausable.sol";
-import "@openzeppelin/contracts/utils/Counters.sol";
-import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+// OpenZeppelinの各種セキュリティ・標準ライブラリ
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol"; // NFT標準
+import "@openzeppelin/contracts/access/Ownable.sol"; // 管理者権限
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol"; // 再入防止
+import "@openzeppelin/contracts/security/Pausable.sol"; // 一時停止
+import "@openzeppelin/contracts/utils/Counters.sol"; // カウンター
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol"; // 署名検証
 
 /**
- * @title AntiScalpingTicket
- * @dev 転売抑止機能付きデジタルチケットNFTコントラクト
- *
- * 主要機能:
- * - KYC認証によるユーザー制限
- * - 価格上限設定による転売抑止
- * - 時間制限付き転売・返金システム
- * - 座席情報管理
- * - 緊急停止機能
- */
-contract AntiScalpingTicket is ERC721, Ownable, ReentrancyGuard, Pausable {
-    using Counters for Counters.Counter;
-    using ECDSA for bytes32;
-
-    // ===== 構造体定義 =====
-
     /**
-     * @dev イベント情報構造体
+     * @dev チケット購入処理
+     *
+     * 指定イベントのNFTチケットを購入する関数。
+     * - KYC認証済み・ブラックリスト外・地域制限クリア済みユーザーのみ購入可能
+     * - イベント販売期間・販売数・支払金額・購入制限などを厳格にチェック
+     * - 購入ごとにNFTチケットを新規発行し、座席情報や入場用シークレットを保存
+     *
+     * @param eventId 購入対象イベントID
+     * @param seatInfo 座席情報（自由記述）
+     * @return ticketId 発行されたチケットID
      */
-    struct Event {
-        string name; // イベント名
-        uint256 eventDate; // 開催日時（Unix timestamp）
-        uint256 maxTickets; // 最大チケット数
-        uint256 originalPrice; // 定価
-        uint256 maxResalePrice; // 転売上限価格
-        bool transferable; // 譲渡可能フラグ
-        bool refundable; // 返金可能フラグ
-        mapping(address => uint256) purchaseCount; // ユーザー別購入数
-        uint256 ticketsSold; // 販売済み数
-        bool isActive; // イベント有効フラグ
-        uint256 saleStartTime; // 販売開始時刻
-        uint256 saleEndTime; // 販売終了時刻
+    function purchaseTicket(
+        uint256 eventId,
+        string memory seatInfo
+    )
+        public
+        payable
+        onlyVerifiedUser // KYC認証済みユーザーのみ
+        whenEventActive(eventId) // イベント有効時のみ
+        onlyAllowedRegion(eventId) // 地域制限クリア必須
+        nonReentrant // 再入防止
+    /**
+     * @dev チケット転売処理
+     *
+     * NFTチケットの所有者が他ユーザーへ転売する際のロジック。
+     * - 転売回数・価格・クールダウン・時間制限・KYC・ブラックリスト等を厳格にチェック
+     * - プラットフォーム手数料を差し引き、履歴を記録し、NFT所有権を移転
+     *
+     * @param ticketId 転売対象チケットID
+     * @param to 転売先アドレス
+     * @param price 転売価格
+     */
+    function resellTicket(
+        uint256 ticketId,
+        address to,
+        uint256 price
+    ) external payable nonReentrant whenNotPaused {
+        // --- バリデーション ---
+        // チケットが存在するか
+        require(_exists(ticketId), "Ticket does not exist");
+        // 呼び出し元が現在の所有者か
+        require(ownerOf(ticketId) == msg.sender, "Not ticket owner");
+        // 転売先アドレスが0アドレスでないか
+        require(to != address(0), "Invalid recipient");
+        // 転売先がKYC認証済みか
+        require(verifiedUsers[to], "Recipient not verified");
+        // 転売先がブラックリストに載っていないか
+        require(!blacklistedUsers[to], "Recipient is blacklisted");
+        // 支払金額が指定された転売価格と一致しているか
+        require(msg.value == price, "Incorrect payment amount");
+
+        // --- 状態取得 ---
+        Ticket storage ticket = tickets[ticketId];
+        Event storage eventInfo = events[ticket.eventId];
+
+        // イベントが譲渡可能か
+        require(eventInfo.transferable, "Ticket not transferable");
+        // チケットが既に使用済みでないか
+        require(!ticket.isUsed, "Ticket already used");
+        // イベント開催前のみ転売可能
+        require(
+            block.timestamp < eventInfo.eventDate,
+            "Event has already occurred"
+        );
+        // 転売クールダウン期間（購入から24時間）経過しているか
+        require(
+            block.timestamp >= ticket.purchaseTime + TRANSFER_COOLDOWN,
+            "Transfer cooldown not met"
+        );
+        // 転売価格がイベントごとの上限を超えていないか
+        require(
+            price <= eventInfo.maxResalePrice,
+            "Price exceeds maximum resale price"
+        );
+        // 転売回数が上限未満か
+        require(
+            ticket.transferCount < MAX_TRANSFER_COUNT,
+            "Transfer count exceeded"
+        );
+
+        // --- 時間制限転売チェック ---
+        // 時間制限転売が有効な場合は、転売期間内か
+        if (timeLimitedResaleEnabled[ticketId]) {
+            require(
+                block.timestamp <= timeLimitedResaleEnd[ticketId],
+                "Time limited resale period ended"
+            );
+        }
+
+        // --- セカンダリ転売価格制限 ---
+        // オリジナル購入者以外が転売する場合は、前回転売価格を超えていないか
+        if (msg.sender != ticket.originalBuyer) {
+            require(
+                price <= ticket.purchasePrice,
+                "Secondary resale must not exceed previous price"
+            );
+        }
+
+        // --- 手数料・支払計算 ---
+        // プラットフォーム手数料（2.5%）を計算
+        uint256 platformFee = (price * PLATFORM_FEE_RATE) / 10000;
+        // 売り手への支払額
+        uint256 sellerAmount = price - platformFee;
+
+        // --- 転売履歴記録 ---
+        transferHistories[ticketId].push(
+            TransferHistory({
+                from: msg.sender,
+                to: to,
+                price: price,
+                timestamp: block.timestamp
+            })
+        );
+
+        // --- 転売回数更新 ---
+        ticket.transferCount++;
+
+        // --- NFT所有権移転 ---
+        _transfer(msg.sender, to, ticketId);
+
+        // --- 売り手・プラットフォームへ支払い ---
+        payable(msg.sender).transfer(sellerAmount);
+        payable(feeRecipient).transfer(platformFee);
+
+        // --- イベント発行 ---
+        emit TicketTransferred(ticketId, msg.sender, to, price);
     }
-
-    /**
-     * @dev チケット情報構造体
-     */
-    struct Ticket {
-        uint256 eventId; // 対象イベントID
-        address originalBuyer; // 元購入者
-        uint256 purchasePrice; // 購入価格
-        uint256 purchaseTime; // 購入時刻
-        bool isUsed; // 使用済みフラグ
-        string seatInfo; // 座席情報
-        uint256 transferCount; // 転売回数
-        bytes32 secretHash; // 入場用シークレットハッシュ
-    }
-
-    /**
-     * @dev 転売履歴構造体
-     */
-    struct TransferHistory {
-        address from;
-        address to;
-        uint256 price;
-        uint256 timestamp;
-    }
-
-    /**
-     * @dev 抽選情報構造体
-     */
+    /// @dev 抽選情報
     struct LotteryInfo {
         uint256 applicationStart; // 応募開始時刻
         uint256 applicationEnd; // 応募終了時刻
@@ -82,54 +151,68 @@ contract AntiScalpingTicket is ERC721, Ownable, ReentrancyGuard, Pausable {
 
     // ===== 状態変数 =====
 
-    // 基本マッピング
     // イベントID => イベント情報
     mapping(uint256 => Event) public events;
     // チケットID => チケット情報
     mapping(uint256 => Ticket) public tickets;
-    mapping(address => bool) public authorizedSellers; // 公式販売者
-    mapping(address => bool) public verifiedUsers; // KYC済みユーザー
-    mapping(address => uint256) public userPurchaseLimit; // ユーザー別購入制限
+    // 公式販売者アドレス管理
+    mapping(address => bool) public authorizedSellers;
+    // KYC認証済みユーザー管理
+    mapping(address => bool) public verifiedUsers;
+    // ユーザーごとの購入制限数
+    mapping(address => uint256) public userPurchaseLimit;
 
     // 追加マッピング
-    mapping(uint256 => TransferHistory[]) public transferHistories; // 転売履歴
-    mapping(address => bool) public blacklistedUsers; // ブラックリストユーザー
-    mapping(uint256 => mapping(address => bool)) public eventWhitelist; // イベント別ホワイトリスト
-    mapping(bytes32 => bool) public usedSecrets; // 使用済みシークレット
+    // チケットID => 転売履歴配列
+    mapping(uint256 => TransferHistory[]) public transferHistories;
+    // ブラックリストユーザー管理
+    mapping(address => bool) public blacklistedUsers;
+    // イベントID => ホワイトリストユーザー
+    mapping(uint256 => mapping(address => bool)) public eventWhitelist;
+    // 使用済みシークレット（入場認証用）
+    mapping(bytes32 => bool) public usedSecrets;
 
     // 地理的制限
+    // 地域制限
     mapping(bytes32 => bool) public allowedRegions; // 許可地域ハッシュ
     mapping(address => bytes32) public userRegion; // ユーザー地域ハッシュ
-    mapping(uint256 => bytes32[]) public eventRegions; // イベント別許可地域
+    mapping(uint256 => bytes32[]) public eventRegions; // イベントごとの許可地域
 
     // 時間制限転売システム
-    mapping(uint256 => uint256) public timeLimitedResaleEnd; // チケット別転売期限
+    // 時間制限転売システム
+    mapping(uint256 => uint256) public timeLimitedResaleEnd; // チケットごとの転売期限
     mapping(uint256 => bool) public timeLimitedResaleEnabled; // 時間制限転売有効フラグ
 
     // 抽選システム
-    mapping(uint256 => LotteryInfo) public lotteries; // イベント別抽選情報
-    mapping(uint256 => mapping(address => bool)) public lotteryApplications; // 抽選応募状況
-    mapping(uint256 => address[]) public lotteryParticipants; // 抽選参加者リスト
-    mapping(uint256 => mapping(address => bool)) public lotteryWinners; // 抽選当選者
+    // 抽選システム
+    mapping(uint256 => LotteryInfo) public lotteries; // イベントID => 抽選情報
+    mapping(uint256 => mapping(address => bool)) public lotteryApplications; // イベントID => ユーザー応募状況
+    mapping(uint256 => address[]) public lotteryParticipants; // イベントID => 応募者リスト
+    mapping(uint256 => mapping(address => bool)) public lotteryWinners; // イベントID => 当選者
 
     // カウンター
+    // イベントID・チケットIDの自動採番用カウンター
     Counters.Counter private _eventIds;
     Counters.Counter private _ticketIds;
 
-    // 定数パラメータ
-    uint256 public constant MAX_RESALE_MULTIPLIER = 110; // 110% = 10%プレミアムまで
+    // 定数
+    // 転売・返金・手数料などの定数パラメータ
+    uint256 public constant MAX_RESALE_MULTIPLIER = 110; // 転売上限（定価の110%まで）
     uint256 public constant TRANSFER_COOLDOWN = 24 hours; // 転売クールダウン期間
-    uint256 public constant REFUND_DEADLINE_HOURS = 48; // 返金期限（時間）
+    uint256 public constant REFUND_DEADLINE_HOURS = 48; // 返金期限（イベント前何時間まで）
     uint256 public constant MAX_TRANSFER_COUNT = 3; // 最大転売回数
-    uint256 public constant PLATFORM_FEE_RATE = 250; // プラットフォーム手数料 2.5%
+    uint256 public constant PLATFORM_FEE_RATE = 250; // プラットフォーム手数料（2.5%）
 
     // 動的パラメータ
-    uint256 public refundFeeRate = 500; // 返金手数料率（5% = 500/10000）
-    address public feeRecipient; // 手数料受取人
+    // 返金手数料率（5% = 500/10000）
+    uint256 public refundFeeRate = 500;
+    // 手数料受取人
+    address public feeRecipient;
 
     // ===== イベント（ログ）定義 =====
 
-    event EventCreated(uint256 indexed eventId, string name, uint256 eventDate); // 新規イベント作成時
+    // 新規イベント作成時
+    event EventCreated(uint256 indexed eventId, string name, uint256 eventDate);
     event TicketMinted(
         uint256 indexed ticketId,
         uint256 indexed eventId,
@@ -162,6 +245,7 @@ contract AntiScalpingTicket is ERC721, Ownable, ReentrancyGuard, Pausable {
 
     // ===== コンストラクタ =====
 
+    // コントラクト初期化（NFT名・シンボル・手数料受取人）
     constructor(address _feeRecipient) ERC721("Anti-Scalping Ticket", "AST") {
         feeRecipient = _feeRecipient;
     }
@@ -305,6 +389,21 @@ contract AntiScalpingTicket is ERC721, Ownable, ReentrancyGuard, Pausable {
 
     /**
      * @dev イベント作成
+     *
+     * 公式販売者が新しいイベント（ライブ・スポーツ等）を作成する関数。
+     * イベント名、開催日時、最大チケット数、定価、転売上限価格、譲渡可否、返金可否、販売期間などを設定。
+     * 転売上限や販売期間などのバリデーションも厳格に行う。
+     *
+     * @param name イベント名
+     * @param eventDate 開催日時（Unixタイムスタンプ）
+     * @param maxTickets 最大チケット数
+     * @param originalPrice チケット定価
+     * @param maxResalePrice 転売上限価格
+     * @param transferable 譲渡可能か
+     * @param refundable 返金可能か
+     * @param saleStartTime 販売開始時刻
+     * @param saleEndTime 販売終了時刻
+     * @return eventId 発行されたイベントID
      */
     function createEvent(
         string memory name,
@@ -317,18 +416,24 @@ contract AntiScalpingTicket is ERC721, Ownable, ReentrancyGuard, Pausable {
         uint256 saleStartTime, // 追加
         uint256 saleEndTime // 追加
     ) external onlyAuthorizedSeller whenNotPaused returns (uint256) {
+        // イベント開催日が未来かチェック
         require(eventDate > block.timestamp, "Event date must be in future");
+        // 販売期間の整合性チェック
         require(saleStartTime < saleEndTime, "Invalid sale period");
         require(saleEndTime <= eventDate, "Sale must end before event");
+        // 転売上限価格が定価以上かチェック
         require(maxResalePrice >= originalPrice, "Max resale price too low");
+        // 転売上限価格が定価のMAX_RESALE_MULTIPLIER%以下かチェック
         require(
             maxResalePrice <= (originalPrice * MAX_RESALE_MULTIPLIER) / 100,
             "Max resale price too high"
         );
 
+        // イベントIDをインクリメントし新規IDを発行
         _eventIds.increment();
         uint256 eventId = _eventIds.current();
 
+        // イベント情報を保存
         Event storage newEvent = events[eventId];
         newEvent.name = name;
         newEvent.eventDate = eventDate;
@@ -337,11 +442,12 @@ contract AntiScalpingTicket is ERC721, Ownable, ReentrancyGuard, Pausable {
         newEvent.maxResalePrice = maxResalePrice;
         newEvent.transferable = transferable;
         newEvent.refundable = refundable;
-        newEvent.ticketsSold = 0;
-        newEvent.isActive = true;
+        newEvent.ticketsSold = 0; // 初期販売数は0
+        newEvent.isActive = true; // デフォルトで有効
         newEvent.saleStartTime = saleStartTime;
         newEvent.saleEndTime = saleEndTime;
 
+        // イベント作成ログを発行
         emit EventCreated(eventId, name, eventDate);
         return eventId;
     }
@@ -534,18 +640,34 @@ contract AntiScalpingTicket is ERC721, Ownable, ReentrancyGuard, Pausable {
     /**
      * @dev チケット使用（署名検証付き）
      */
+    /**
+     * @dev チケット使用（署名検証付き）
+     *
+     * イベント会場等でチケットを使用する際、NFT所有者の署名とシークレットを検証し、
+     * 不正利用や二重利用を防止する。公式販売者のみ実行可能。
+     *
+     * @param ticketId 使用するチケットID
+     * @param secret 入場用シークレット（乱数等）
+     * @param signature NFT所有者による署名
+     */
     function useTicketWithSignature(
         uint256 ticketId,
         bytes32 secret,
         bytes memory signature
     ) external onlyAuthorizedSeller whenNotPaused {
+        // チケット存在チェック
         require(_exists(ticketId), "Ticket does not exist");
+        // シークレットの二重利用防止
         require(!usedSecrets[secret], "Secret already used");
 
+        // チケット情報取得
         Ticket storage ticket = tickets[ticketId];
+        // 既に使用済みか
         require(!ticket.isUsed, "Ticket already used");
 
+        // イベント情報取得
         Event storage eventInfo = events[ticket.eventId];
+        // イベント開始2時間前以降、終了6時間後以前のみ使用可能
         require(
             block.timestamp >= eventInfo.eventDate - 2 hours,
             "Too early to use ticket"
@@ -555,17 +677,18 @@ contract AntiScalpingTicket is ERC721, Ownable, ReentrancyGuard, Pausable {
             "Too late to use ticket"
         );
 
-        // 署名検証
+        // 署名検証（NFT所有者がticketIdとsecretで署名したことを確認）
         bytes32 messageHash = keccak256(abi.encodePacked(ticketId, secret));
         address signer = messageHash.toEthSignedMessageHash().recover(
             signature
         );
         require(signer == ownerOf(ticketId), "Invalid signature");
 
-        // チケット使用処理
+        // チケット使用処理（使用済みフラグ・シークレット登録）
         ticket.isUsed = true;
         usedSecrets[secret] = true;
 
+        // ログ発行
         emit TicketUsed(ticketId, secret);
     }
 
